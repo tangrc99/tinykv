@@ -181,7 +181,7 @@ func newRaft(c *Config) *Raft {
 		RaftLog:          newLog(c.Storage),
 		Prs:              make(map[uint64]*Progress),
 		votes:            make(map[uint64]bool),
-		msgs:             make([]pb.Message, 0, 100),
+		msgs:             make([]pb.Message, 0),
 		heartbeatTimeout: c.HeartbeatTick,
 		electionTimeout:  c.ElectionTick,
 	}
@@ -432,7 +432,7 @@ func (r *Raft) tickElection() {
 	if r.electionElapsed >= r.randomElectionTimeout {
 		log.Infof("%s election timeout, start a new election", r)
 		r.electionElapsed = 0
-		r.Step(pb.Message{MsgType: pb.MessageType_MsgHup})
+		_ = r.Step(pb.Message{MsgType: pb.MessageType_MsgHup})
 	}
 }
 
@@ -443,7 +443,7 @@ func (r *Raft) tickHeartbeat() {
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
 		log.Infof("%s heartbeat timeout, broadcast beat", r)
 		r.heartbeatElapsed = 0
-		r.Step(pb.Message{MsgType: pb.MessageType_MsgBeat})
+		_ = r.Step(pb.Message{MsgType: pb.MessageType_MsgBeat})
 	}
 }
 
