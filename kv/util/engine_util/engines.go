@@ -29,10 +29,12 @@ func NewEngines(kvEngine, raftEngine *badger.DB, kvPath, raftPath string) *Engin
 	}
 }
 
+// WriteKV writes batch to kv db
 func (en *Engines) WriteKV(wb *WriteBatch) error {
 	return wb.WriteToDB(en.Kv)
 }
 
+// WriteRaft writes batch to raft db
 func (en *Engines) WriteRaft(wb *WriteBatch) error {
 	return wb.WriteToDB(en.Raft)
 }

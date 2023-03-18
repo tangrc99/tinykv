@@ -2,6 +2,10 @@ package raftstore
 
 import (
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"github.com/pingcap-incubator/tinykv/raft"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -43,6 +47,176 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	// Your Code Here (2B).
+
+	if d.RaftGroup.HasReady() {
+		rd := d.RaftGroup.Ready()
+
+		// 处理 raftlog 有关的事情
+		ret, err := d.peerStorage.SaveReadyState(&rd)
+		if err != nil {
+			return
+		}
+		if ret != nil {
+			d.peerStorage.SetRegion(ret.Region)
+			d.ctx.storeMeta.Lock()
+			d.ctx.storeMeta.regions[d.Region().Id] = d.Region()
+			d.ctx.storeMeta.Unlock()
+		}
+
+		// 处理 raft message 的相关事情
+		if len(rd.Messages) > 0 {
+			d.Send(d.ctx.trans, rd.Messages)
+		}
+
+		// 如果有已经 commit 的事务
+		if len(rd.CommittedEntries) > 0 {
+
+			d.HandleCommitEntries(rd)
+		}
+
+		d.RaftGroup.Advance(rd)
+	}
+
+}
+
+// replyProposals 尝试将 entry 之前的 proposal 全部进行回复
+func (d *peerMsgHandler) replyProposals(resp *raft_cmdpb.RaftCmdResponse, entry *eraftpb.Entry, updateTx bool) {
+
+	for len(d.proposals) > 0 {
+		p := d.proposals[0]
+
+		if p.index < entry.Index {
+
+			p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
+			d.proposals = d.proposals[1:]
+
+		} else if p.index == entry.Index {
+			// 要求 index 和 term 全部都相等
+			if p.term != entry.Term {
+				p.cb.Done(ErrRespStaleCommand(entry.Term))
+			} else {
+				if updateTx {
+					p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+				}
+				p.cb.Done(resp)
+			}
+			d.proposals = d.proposals[1:]
+			break
+		}
+
+	}
+
+}
+
+// HandleCommitEntries 尝试将所有 commited entries 中的 request 执行，并且将该 entry 写入到 raft 持久化中。
+func (d *peerMsgHandler) HandleCommitEntries(rd raft.Ready) {
+
+	for _, ent := range rd.CommittedEntries {
+
+		kvWB := new(engine_util.WriteBatch)
+
+		d.execCommittedRequests(&ent, kvWB)
+
+		d.peerStorage.applyState.AppliedIndex = ent.Index
+		err := kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+		if err != nil {
+			panic(err)
+		}
+
+		if d.stopped {
+			WB := new(engine_util.WriteBatch)
+			WB.DeleteMeta(meta.ApplyStateKey(d.regionId))
+			err = WB.WriteToDB(d.peerStorage.Engines.Kv)
+			if err != nil {
+				panic(err)
+			}
+			return
+		}
+		//kvWB.MustWriteToDB(d.peerStorage.Engines.Kv)
+		err = kvWB.WriteToDB(d.peerStorage.Engines.Kv)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+}
+
+// execCommittedRequests 尝试执行 entry 之前的全部 proposal。
+// kvWB 这个参数是因为，request 是被包含在一条 log entry 中的，在写 log entry 时也需要把 request 也写到同一个操作中。
+func (d *peerMsgHandler) execCommittedRequests(ent *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
+
+	// 这一个函数的逻辑，先执行 entry 中所有的 request，然后对 proposals 进行提交和回复
+	// 当一个 entry 提交后，它并没有被写入到 kv 数据库里面，因此还需要进行一次写入操作。
+	msg := &raft_cmdpb.RaftCmdRequest{}
+	err := msg.Unmarshal(ent.Data)
+	if err != nil {
+		panic(err)
+	}
+
+	if len(msg.Requests) == 0 {
+		if msg.AdminRequest != nil {
+			switch msg.AdminRequest.CmdType {
+			case raft_cmdpb.AdminCmdType_InvalidAdmin:
+
+			case raft_cmdpb.AdminCmdType_ChangePeer:
+
+			case raft_cmdpb.AdminCmdType_CompactLog:
+
+				compactLog := msg.AdminRequest.GetCompactLog()
+				if compactLog.CompactIndex >= d.peerStorage.applyState.TruncatedState.Index {
+					d.peerStorage.applyState.TruncatedState.Index = compactLog.CompactIndex
+					d.peerStorage.applyState.TruncatedState.Term = compactLog.CompactTerm
+					kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+					d.ScheduleCompactLog(compactLog.CompactIndex)
+				}
+			case raft_cmdpb.AdminCmdType_TransferLeader:
+
+			case raft_cmdpb.AdminCmdType_Split:
+			}
+
+		}
+		return
+	}
+
+	for _, req := range msg.Requests {
+		resp := newCmdResp()
+		// 对数据库进行操作
+		switch req.CmdType {
+		case raft_cmdpb.CmdType_Invalid:
+
+		case raft_cmdpb.CmdType_Get:
+			kvEngine := d.peerStorage.Engines.Kv
+			value, _ := engine_util.GetCF(kvEngine, req.Get.Cf, req.Get.Key)
+			// 进行回复
+			resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Get, Get: &raft_cmdpb.GetResponse{Value: value}}}
+			d.replyProposals(resp, ent, false)
+
+		case raft_cmdpb.CmdType_Put:
+
+			// 写入数据库中
+			kvWB.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
+			// 进行回复
+			resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Put, Put: &raft_cmdpb.PutResponse{}}}
+			d.replyProposals(resp, ent, false)
+
+		case raft_cmdpb.CmdType_Delete:
+			resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Delete, Delete: &raft_cmdpb.DeleteResponse{}}}
+			d.replyProposals(resp, ent, false)
+
+		case raft_cmdpb.CmdType_Snap:
+
+			if msg.Header.RegionEpoch.Version != d.Region().RegionEpoch.Version {
+				d.replyProposals(ErrResp(&util.ErrEpochNotMatch{}), ent, false)
+				continue
+			}
+			resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Snap,
+				Snap: &raft_cmdpb.SnapResponse{Region: d.Region()}}}
+			d.replyProposals(resp, ent, true)
+
+		}
+
+	}
+
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -107,6 +281,7 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 	return err
 }
 
+// proposeRaftCommand 只是将请求发送到 raft 集群中，但是不会直接写入
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	err := d.preProposeRaftCommand(msg)
 	if err != nil {
@@ -114,6 +289,61 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
+
+	if msg.AdminRequest != nil {
+		// TODO : 处理 admin 请求
+		switch msg.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_CompactLog:
+			//msg.AdminRequest.CompactLog.CompactIndex
+			//msg.AdminRequest.CompactLog.CompactTerm
+			data, err := msg.Marshal()
+			if err != nil {
+				panic(err)
+			}
+			d.RaftGroup.Propose(data)
+
+		default:
+			log.Panicf("Invalid amin request type: %s", raft_cmdpb.AdminCmdType_name[int32(msg.AdminRequest.CmdType)])
+		}
+	}
+
+	// 每一次取第一条消息进行处理
+	for len(msg.Requests) > 0 {
+		req := msg.Requests[0]
+		var key []byte
+		switch req.CmdType {
+		case raft_cmdpb.CmdType_Invalid:
+
+		case raft_cmdpb.CmdType_Get:
+			key = req.Get.Key
+		case raft_cmdpb.CmdType_Put:
+			key = req.Put.Key
+		case raft_cmdpb.CmdType_Delete:
+			key = req.Delete.Key
+		case raft_cmdpb.CmdType_Snap:
+
+		default:
+
+		}
+		err = util.CheckKeyInRegion(key, d.Region())
+		if err != nil && req.CmdType != raft_cmdpb.CmdType_Snap {
+			cb.Done(ErrResp(err))
+			msg.Requests = msg.Requests[1:]
+			continue
+		}
+		data, err := msg.Marshal()
+		if err != nil && data != nil {
+			panic(err)
+		}
+
+		p := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
+		d.proposals = append(d.proposals, p)
+
+		d.RaftGroup.Propose(data)
+
+		msg.Requests = msg.Requests[1:]
+	}
+
 }
 
 func (d *peerMsgHandler) onTick() {
@@ -223,9 +453,9 @@ func (d *peerMsgHandler) validateRaftMessage(msg *rspb.RaftMessage) bool {
 	return true
 }
 
-/// Checks if the message is sent to the correct peer.
-///
-/// Returns true means that the message can be dropped silently.
+// / Checks if the message is sent to the correct peer.
+// /
+// / Returns true means that the message can be dropped silently.
 func (d *peerMsgHandler) checkMessage(msg *rspb.RaftMessage) bool {
 	fromEpoch := msg.GetRegionEpoch()
 	isVoteMsg := util.IsVoteMessage(msg.Message)

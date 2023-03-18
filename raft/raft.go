@@ -441,7 +441,7 @@ func (r *Raft) tickElection() {
 func (r *Raft) tickHeartbeat() {
 	r.heartbeatElapsed++
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
-		log.Infof("%s heartbeat timeout, broadcast beat", r)
+		log.Debugf("%s heartbeat timeout, broadcast beat", r)
 		r.heartbeatElapsed = 0
 		_ = r.Step(pb.Message{MsgType: pb.MessageType_MsgBeat})
 	}
@@ -450,7 +450,7 @@ func (r *Raft) tickHeartbeat() {
 // becomeFollower transform this peer's state to Follower.
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
-	log.Infof("%s state: %v -> %v, curr leader: %v", r, r.State, StateFollower, lead)
+	log.Infof("%s state: %v -> %v, cur leader: %v", r, r.State, StateFollower, lead)
 	r.State = StateFollower
 	r.Lead = lead
 	r.Term = term

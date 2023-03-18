@@ -32,6 +32,7 @@ func newRaftWorker(ctx *GlobalContext, pm *router) *raftWorker {
 // After commands are handled, we collect apply messages by peers, make a applyBatch, send it to apply channel.
 func (rw *raftWorker) run(closeCh <-chan struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
+
 	var msgs []message.Msg
 	for {
 		msgs = msgs[:0]

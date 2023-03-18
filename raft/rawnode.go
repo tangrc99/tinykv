@@ -155,7 +155,6 @@ func (rn *RawNode) Ready() Ready {
 	rd := Ready{
 		Entries:          rn.Raft.RaftLog.unstableEntries(),
 		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
-		//Snapshot:
 	}
 
 	if !isHardStateEqual(rn.Raft.hardState(), rn.hardState) {
