@@ -177,7 +177,7 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 }
 
 // MostRecentWrite finds the most recent write with the given key. It returns a Write from the DB and that
-// write's commit timestamp, or an error.
+// write's commit timestamp, or an error. Transaction timestamp is not considered
 func (txn *MvccTxn) MostRecentWrite(key []byte) (*Write, uint64, error) {
 	// Your Code Here (4A).
 
