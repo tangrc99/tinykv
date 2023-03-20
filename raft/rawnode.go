@@ -183,6 +183,13 @@ func (rn *RawNode) Ready() Ready {
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
 
+	curSoftState := rn.Raft.softState()
+
+	if !(curSoftState.Lead == rn.softState.Lead &&
+		curSoftState.RaftState == rn.softState.RaftState) {
+		return true
+	}
+
 	cHardState := pb.HardState{
 		Term:   rn.Raft.Term,
 		Vote:   rn.Raft.Vote,

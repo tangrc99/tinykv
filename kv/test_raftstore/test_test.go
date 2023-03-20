@@ -479,12 +479,8 @@ func TestOneSnapshot2C(t *testing.T) {
 	MustGetCfEqual(cluster.engines[1], cf, []byte("k100"), []byte("v100"))
 	MustGetCfNone(cluster.engines[1], cf, []byte("k2"))
 
-	println("fdsdfds")
-
 	cluster.StopServer(1)
-	println("213123123")
 	cluster.StartServer(1)
-	println("v wefewfsdf")
 	MustGetCfEqual(cluster.engines[1], cf, []byte("k1"), []byte("v1"))
 
 	for _, engine := range cluster.engines {

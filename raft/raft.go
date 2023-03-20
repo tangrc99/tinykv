@@ -249,13 +249,7 @@ func (r *Raft) send(m pb.Message) {
 		log.Panicf("term should be set when sending %s", m.MsgType)
 
 	} else {
-		if m.Term == 0 {
-			log.Panicf("term should not be set when sending %s (was %d)", m.MsgType, m.Term)
-		}
-		// do not attach term to MsgProp, MsgReadIndex
-		// proposals are a way to forward to the leader and
-		// should be treated as local message.
-		// MsgReadIndex is also forwarded to leader.
+
 		if m.MsgType != pb.MessageType_MsgPropose {
 			m.Term = r.Term
 		}
@@ -401,6 +395,18 @@ func (r *Raft) sendSnapshot(to uint64) {
 		r, to, r.Term, snapshot.Metadata.Term, snapshot.Metadata.Index)
 }
 
+// sendTransferLeader sends transfer leader request from non-leader node to leader.
+func (r *Raft) sendTransferLeader() {
+
+	msg := pb.Message{
+		To:      r.Lead,
+		MsgType: pb.MessageType_MsgTransferLeader,
+	}
+
+	r.send(msg)
+	log.Infof("Send leader transfer from %d to %d", r.id, r.Lead)
+}
+
 // sendTimeout sends from the leader to the leadership transfer target
 // to let the leadership transfer target timeout immediately and start
 // a new election.
@@ -422,6 +428,9 @@ func (r *Raft) tick() {
 		r.tickElection()
 	case StateLeader:
 		r.tickHeartbeat()
+		if r.leadTransferee != None {
+			r.tickTransfer()
+		}
 	}
 }
 
@@ -444,6 +453,18 @@ func (r *Raft) tickHeartbeat() {
 		log.Debugf("%s heartbeat timeout, broadcast beat", r)
 		r.heartbeatElapsed = 0
 		_ = r.Step(pb.Message{MsgType: pb.MessageType_MsgBeat})
+	}
+}
+
+// tickTransfer advanced `r.transferElapsed` and determines
+// whether to transfer the leadership.
+func (r *Raft) tickTransfer() {
+	r.transferElapsed++
+	// The leadership transfer has not been completed after two rounds of elections.
+	// The target node may hang up and be turn leadTransferee into none.
+	if r.transferElapsed >= 2*r.electionTimeout {
+		r.transferElapsed = 0
+		r.leadTransferee = None
 	}
 }
 
@@ -538,7 +559,7 @@ func (r *Raft) stepFollower(m pb.Message) error {
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
 	case pb.MessageType_MsgTransferLeader:
-		//TODO:
+		r.sendTransferLeader()
 	case pb.MessageType_MsgTimeoutNow:
 		r.handleElection()
 	}
@@ -573,8 +594,9 @@ func (r *Raft) stepCandidate(m pb.Message) error {
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
 	case pb.MessageType_MsgTransferLeader:
-		// TODO:
+		r.sendTransferLeader()
 	case pb.MessageType_MsgTimeoutNow:
+
 	}
 	return nil
 }
@@ -612,7 +634,7 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		r.sendAppend(m.From)
 	// request msg to let it transfer leadership
 	case pb.MessageType_MsgTransferLeader:
-		// TODO:
+		r.handleTransferLeader(m)
 	// ignore
 	case pb.MessageType_MsgTimeoutNow:
 	}
@@ -923,9 +945,61 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 // addNode adds a new node to raft group.
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	r.PendingConfIndex = None
+
+	if _, exist := r.Prs[id]; exist {
+		log.Warnf("Add an existing node, id: %d", id)
+		return
+	}
+
+	r.Prs[id] = &Progress{
+		Next:  1,
+		Match: 0,
+	}
+
 }
 
 // removeNode removes a node from raft group.
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	if _, exist := r.Prs[id]; !exist {
+		log.Warnf("Delete an non-existing node, id: %d", id)
+		return
+	}
+
+	delete(r.Prs, id)
+	r.PendingConfIndex = None
+
+	// enable the
+	if r.State == StateLeader {
+		r.tryCommit()
+	}
+}
+
+// handleTransferLeader handles TransferLeader RPC request
+func (r *Raft) handleTransferLeader(m pb.Message) {
+
+	log.Infof("Receive leader transfer from %d to %d", r.id, m.From)
+
+	if r.State != StateLeader || m.From == r.id || (r.leadTransferee != None && m.From == r.leadTransferee) {
+		return
+	}
+
+	// peer node from other group
+	if _, exist := r.Prs[m.From]; !exist {
+		return
+	}
+
+	log.Infof("Start leader transfer from %d to %d", r.id, m.From)
+
+	r.leadTransferee = m.From
+	r.transferElapsed = 0
+
+	// check the index
+	if r.Prs[m.From].Next == r.Prs[r.id].Next {
+		r.sendTimeout(m.From)
+	} else {
+		r.sendAppend(m.From)
+	}
+
 }

@@ -49,6 +49,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	// Your Code Here (2B).
 
 	if d.RaftGroup.HasReady() {
+
 		rd := d.RaftGroup.Ready()
 
 		// 处理 raftlog 有关的事情
@@ -77,6 +78,91 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		d.RaftGroup.Advance(rd)
 	}
 
+}
+func (d *peerMsgHandler) process(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
+
+	// handle AdminRequest
+	msg := &raft_cmdpb.RaftCmdRequest{}
+	err := msg.Unmarshal(entry.Data)
+	if err != nil {
+		panic(err)
+	}
+	if len(msg.Requests) == 0 {
+		if msg.AdminRequest != nil {
+			req := msg.AdminRequest
+			switch req.CmdType {
+			case raft_cmdpb.AdminCmdType_CompactLog:
+				compactLog := req.GetCompactLog()
+				if compactLog.CompactIndex >= d.peerStorage.applyState.TruncatedState.Index {
+					d.peerStorage.applyState.TruncatedState.Index = compactLog.CompactIndex
+					d.peerStorage.applyState.TruncatedState.Term = compactLog.CompactTerm
+					kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+					d.ScheduleCompactLog(compactLog.CompactIndex)
+				}
+			case raft_cmdpb.AdminCmdType_Split:
+			}
+		}
+		return
+	}
+
+	if len(msg.Requests) > 0 {
+		req := msg.Requests[0]
+		// applying
+		switch req.CmdType {
+		case raft_cmdpb.CmdType_Get:
+		case raft_cmdpb.CmdType_Put:
+			kvWB.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
+		case raft_cmdpb.CmdType_Delete:
+			kvWB.DeleteCF(req.Delete.Cf, req.Delete.Key)
+		case raft_cmdpb.CmdType_Snap:
+		}
+		// callback after applying
+		if len(d.proposals) > 0 {
+			p := d.proposals[0]
+
+			// println("Callback No.", p.index, "proposal", "entry.Index:", entry.Index)
+
+			for p.index < entry.Index {
+				p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
+				d.proposals = d.proposals[1:]
+				if len(d.proposals) == 0 {
+					return
+				}
+				p = d.proposals[0]
+			}
+			if p.index == entry.Index {
+				if p.term != entry.Term {
+					NotifyStaleReq(entry.Term, p.cb)
+				} else {
+					resp := newCmdResp()
+
+					//resp := &raft_cmdpb.RaftCmdResponse{Header: &raft_cmdpb.RaftResponseHeader{}}
+					switch req.CmdType {
+					case raft_cmdpb.CmdType_Get:
+						value, _ := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
+						resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Get,
+							Get: &raft_cmdpb.GetResponse{Value: value}}}
+					case raft_cmdpb.CmdType_Put:
+						resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Put,
+							Put: &raft_cmdpb.PutResponse{}}}
+					case raft_cmdpb.CmdType_Delete:
+						resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Delete,
+							Delete: &raft_cmdpb.DeleteResponse{}}}
+					case raft_cmdpb.CmdType_Snap:
+						if msg.Header.RegionEpoch.Version != d.Region().RegionEpoch.Version {
+							p.cb.Done(ErrResp(&util.ErrEpochNotMatch{}))
+							return
+						}
+						resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Snap,
+							Snap: &raft_cmdpb.SnapResponse{Region: d.Region()}}}
+						p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+					}
+					p.cb.Done(resp)
+				}
+				d.proposals = d.proposals[1:]
+			}
+		}
+	}
 }
 
 // replyProposals 尝试将 entry 之前的 proposal 全部进行回复
@@ -166,7 +252,7 @@ func (d *peerMsgHandler) execCommittedRequests(ent *eraftpb.Entry, kvWB *engine_
 				if compactLog.CompactIndex >= d.peerStorage.applyState.TruncatedState.Index {
 					d.peerStorage.applyState.TruncatedState.Index = compactLog.CompactIndex
 					d.peerStorage.applyState.TruncatedState.Term = compactLog.CompactTerm
-					kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+					_ = kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
 					d.ScheduleCompactLog(compactLog.CompactIndex)
 				}
 			case raft_cmdpb.AdminCmdType_TransferLeader:
@@ -178,45 +264,65 @@ func (d *peerMsgHandler) execCommittedRequests(ent *eraftpb.Entry, kvWB *engine_
 		return
 	}
 
-	for _, req := range msg.Requests {
-		resp := newCmdResp()
-		// 对数据库进行操作
-		switch req.CmdType {
-		case raft_cmdpb.CmdType_Invalid:
+	if len(msg.Requests) > 0 {
+		req := msg.Requests[0]
+		// applying
+		if req.CmdType == raft_cmdpb.CmdType_Put {
 
-		case raft_cmdpb.CmdType_Get:
-			kvEngine := d.peerStorage.Engines.Kv
-			value, _ := engine_util.GetCF(kvEngine, req.Get.Cf, req.Get.Key)
-			// 进行回复
-			resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Get, Get: &raft_cmdpb.GetResponse{Value: value}}}
-			d.replyProposals(resp, ent, false)
-
-		case raft_cmdpb.CmdType_Put:
-
-			// 写入数据库中
 			kvWB.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
-			// 进行回复
-			resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Put, Put: &raft_cmdpb.PutResponse{}}}
-			d.replyProposals(resp, ent, false)
 
-		case raft_cmdpb.CmdType_Delete:
-			resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Delete, Delete: &raft_cmdpb.DeleteResponse{}}}
-			d.replyProposals(resp, ent, false)
+		} else if req.CmdType == raft_cmdpb.CmdType_Delete {
 
-		case raft_cmdpb.CmdType_Snap:
-
-			if msg.Header.RegionEpoch.Version != d.Region().RegionEpoch.Version {
-				d.replyProposals(ErrResp(&util.ErrEpochNotMatch{}), ent, false)
-				continue
-			}
-			resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Snap,
-				Snap: &raft_cmdpb.SnapResponse{Region: d.Region()}}}
-			d.replyProposals(resp, ent, true)
-
+			kvWB.DeleteCF(req.Delete.Cf, req.Delete.Key)
 		}
 
-	}
+		// callback after applying
+		if len(d.proposals) > 0 {
+			p := d.proposals[0]
 
+			for p.index < ent.Index {
+				p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
+				d.proposals = d.proposals[1:]
+				if len(d.proposals) == 0 {
+					return
+				}
+				p = d.proposals[0]
+			}
+			if p.index == ent.Index {
+				if p.term != ent.Term {
+					NotifyStaleReq(ent.Term, p.cb)
+				} else {
+					resp := newCmdResp()
+
+					switch req.CmdType {
+					case raft_cmdpb.CmdType_Get:
+						value, _ := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
+						resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Get,
+							Get: &raft_cmdpb.GetResponse{Value: value}}}
+
+					case raft_cmdpb.CmdType_Put:
+						resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Put,
+							Put: &raft_cmdpb.PutResponse{}}}
+
+					case raft_cmdpb.CmdType_Delete:
+						resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Delete,
+							Delete: &raft_cmdpb.DeleteResponse{}}}
+
+					case raft_cmdpb.CmdType_Snap:
+						if msg.Header.RegionEpoch.Version != d.Region().RegionEpoch.Version {
+							p.cb.Done(ErrResp(&util.ErrEpochNotMatch{}))
+							return
+						}
+						resp.Responses = []*raft_cmdpb.Response{{CmdType: raft_cmdpb.CmdType_Snap,
+							Snap: &raft_cmdpb.SnapResponse{Region: d.Region()}}}
+						p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+					}
+					p.cb.Done(resp)
+				}
+				d.proposals = d.proposals[1:]
+			}
+		}
+	}
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
