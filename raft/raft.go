@@ -596,6 +596,7 @@ func (r *Raft) stepCandidate(m pb.Message) error {
 	case pb.MessageType_MsgTransferLeader:
 		r.sendTransferLeader()
 	case pb.MessageType_MsgTimeoutNow:
+		r.handleElection()
 
 	}
 	return nil
@@ -979,11 +980,11 @@ func (r *Raft) removeNode(id uint64) {
 // handleTransferLeader handles TransferLeader RPC request
 func (r *Raft) handleTransferLeader(m pb.Message) {
 
-	log.Infof("Receive leader transfer from %d to %d", r.id, m.From)
-
 	if r.State != StateLeader || m.From == r.id || (r.leadTransferee != None && m.From == r.leadTransferee) {
 		return
 	}
+
+	log.Infof("Receive leader transfer from %d to %d", r.id, m.From)
 
 	// peer node from other group
 	if _, exist := r.Prs[m.From]; !exist {
