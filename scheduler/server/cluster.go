@@ -16,6 +16,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
 	"path"
 	"sync"
 	"time"
@@ -280,6 +281,42 @@ func (c *RaftCluster) handleStoreHeartbeat(stats *schedulerpb.StoreStats) error 
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	// Your Code Here (3C).
 
+	if region == nil {
+		return nil
+	}
+
+	// check is region existed
+	oldRegion := c.GetRegion(region.GetID())
+
+	if oldRegion != nil {
+
+		if util.IsEpochStale(region.GetRegionEpoch(), oldRegion.GetRegionEpoch()) {
+			// this is a stale heartbeat
+			return ErrRegionIsStale(region.GetMeta(), oldRegion.GetMeta())
+		}
+	} else {
+		// scan all regions that overlap with it
+		overlaps := c.core.GetOverlaps(region)
+		for _, rg := range overlaps {
+
+			// when a region don't have previous information, it may be invalid
+			if rg.GetRegionEpoch() == nil || region.GetRegionEpoch() == nil || util.IsEpochStale(region.GetRegionEpoch(), rg.GetRegionEpoch()) {
+				return ErrRegionIsStale(region.GetMeta(), rg.GetMeta())
+			}
+		}
+	}
+
+	// this is a fresh heartbeat, update status
+
+	// update region
+	err := c.putRegion(region)
+	if err != nil {
+		return err
+	}
+	// update store status
+	for storeId := range region.GetStoreIds() {
+		c.updateStoreStatusLocked(storeId)
+	}
 	return nil
 }
 
