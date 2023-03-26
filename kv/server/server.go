@@ -526,6 +526,8 @@ func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollb
 	return resp, nil
 }
 
+// KvResolveLock is used to commit a transaction (CommitVersion != 0) or rollback a transaction (CommitVersion == 0).
+// After KvCheckTxnStatus is already called.
 func (server *Server) KvResolveLock(c context.Context, req *kvrpcpb.ResolveLockRequest) (*kvrpcpb.ResolveLockResponse, error) {
 	// Your Code Here (4C).
 
@@ -544,6 +546,7 @@ func (server *Server) KvResolveLock(c context.Context, req *kvrpcpb.ResolveLockR
 
 	tx := mvcc.NewMvccTxn(reader, req.StartVersion)
 
+	// Get all locks of this transaction
 	pairs, err := mvcc.AllLocksForTxn(tx)
 	if err != nil {
 		if regionErr, ok := err.(*raft_storage.RegionError); ok {

@@ -274,7 +274,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 			return false
 		}
 		// This should not happen.
-		log.Panicf("Get log term %s", err.Error())
+		log.Panicf("Failed to get log term %s", err.Error())
 	}
 	var entries []*pb.Entry
 	n := len(r.RaftLog.entries)
@@ -683,6 +683,8 @@ func (r *Raft) appendEntries(entries []*pb.Entry) {
 	r.Prs[r.id].Match = r.RaftLog.LastIndex()
 	r.Prs[r.id].Next = r.Prs[r.id].Match + 1
 	r.broadcastAppendEntries()
+
+	// if there is only one node, commit it immediately
 	if len(r.Prs) == 1 {
 		r.RaftLog.committed = r.Prs[r.id].Match
 	}
@@ -721,7 +723,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	log.Debugf("%s receive AEA: {from=%d, term=%d, logTerm=%d, index=%d, len=%d, entries=%s}",
 		r, m.From, m.Term, m.LogTerm, m.Index, len(m.Entries), m.Entries)
 
-	// 5.1 Reply false if term < currentTerm.
+	// reply false if term < currentTerm.
 	if m.Term != None && m.Term < r.Term {
 		r.sendAppendResponse(m.From, true, None, None)
 		return
@@ -731,7 +733,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	r.resetElectionTimeout()
 	r.Lead = m.From
 
-	// 5.2 Reply false if log doesn't contain an entry at prevLogIndex
+	// reply false if log doesn't contain an entry at prevLogIndex
 	// whose term matches prevLogTerm.
 	l := r.RaftLog
 	lastIndex := l.LastIndex()
@@ -744,7 +746,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	if m.Index >= l.FirstIndex() {
 		logTerm, err := l.Term(m.Index)
 		if err != nil {
-			log.Panic("Get log term", err.Error())
+			log.Panic("Failed to get log term", err.Error())
 		}
 		// The term of prev log entry is different.
 		if logTerm != m.LogTerm {
