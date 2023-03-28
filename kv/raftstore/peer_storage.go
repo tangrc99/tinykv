@@ -322,6 +322,7 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 		return nil
 	} else if firstIndex > entries[0].Index {
 		entries = entries[firstIndex-entries[0].Index:]
+		entLen = len(entries)
 	}
 
 	for i := range entries {
@@ -329,6 +330,9 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 		if err := raftWB.SetMeta(key, &entries[i]); err != nil {
 			return err
 		}
+		// update status
+		ps.raftState.LastTerm = entries[i].Term
+		ps.raftState.LastIndex = entries[i].Index
 	}
 
 	// delete log entries that will never be committed
