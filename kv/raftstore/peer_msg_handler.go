@@ -286,7 +286,8 @@ func (d *peerMsgHandler) execCommittedRequests(ent *eraftpb.Entry, kvWB *engine_
 
 				err = util.CheckKeyInRegion(req.SplitKey, d.Region())
 				if err != nil {
-					d.replyProposals(ErrResp(err), ent, false)
+					//d.replyProposals(ErrResp(err), ent, false)
+					d.replyProposals(ErrRespStaleCommand(d.Term()), ent, false)
 					return
 				}
 
@@ -494,7 +495,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	// Your Code Here (2B).
 
 	if msg.AdminRequest != nil {
-		// TODO : 处理 admin 请求
+
 		switch msg.AdminRequest.CmdType {
 		case raft_cmdpb.AdminCmdType_CompactLog:
 			//msg.AdminRequest.CompactLog.CompactIndex
@@ -503,7 +504,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 			if err != nil {
 				panic(err)
 			}
-			d.RaftGroup.Propose(data)
+			_ = d.RaftGroup.Propose(data)
 
 		case raft_cmdpb.AdminCmdType_ChangePeer:
 
@@ -533,10 +534,18 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 
 		case raft_cmdpb.AdminCmdType_Split:
 
+			if msg.Header.RegionId != d.regionId {
+				regionNotFound := &util.ErrRegionNotFound{RegionId: msg.Header.RegionId}
+				resp := ErrResp(regionNotFound)
+				cb.Done(resp)
+				break
+			}
 			// check the key is in current region
 			err := util.CheckKeyInRegion(msg.AdminRequest.Split.SplitKey, d.Region())
 			if err != nil {
-				cb.Done(ErrResp(err))
+				cb.Done(ErrRespStaleCommand(d.Term()))
+				break
+				//cb.Done(ErrResp(err))
 			}
 			data, err := msg.Marshal()
 			if err != nil {
@@ -581,7 +590,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		p := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
 		d.proposals = append(d.proposals, p)
 
-		d.RaftGroup.Propose(data)
+		_ = d.RaftGroup.Propose(data)
 
 		msg.Requests = msg.Requests[1:]
 	}
